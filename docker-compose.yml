@@ -1,4 +1,7 @@
 ﻿services:
+  # ======================
+  # Étape 1 — Jupyter
+  # ======================
   jupyter:
     image: jupyter/pyspark-notebook:latest
     ports:
@@ -10,6 +13,9 @@
     networks:
       - bdnet
 
+  # ======================
+  # Étape 2 — Kafka
+  # ======================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.7.7
     environment:
@@ -27,6 +33,7 @@
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      # 2 listeners : INTERNAL (Docker) + EXTERNAL (PC)
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
       KAFKA_LISTENERS: "INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092"
       KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:29092,EXTERNAL://localhost:9092"
@@ -45,5 +52,63 @@
     networks:
       - bdnet
 
+  # ======================
+  # Étape 3 — Spark Standalone
+  # ======================
+  spark-master:
+    image: apache/spark:3.5.1-python3
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"   # Spark Master UI
+      - "7077:7077"   # Spark Master
+    command: >
+      bash -lc "/opt/spark/sbin/start-master.sh --host spark-master --port 7077 --webui-port 8080
+      && tail -f /opt/spark/logs/*"
+    networks:
+      - bdnet
+
+  spark-worker:
+    image: apache/spark:3.5.1-python3
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8081:8081"   # Spark Worker UI
+    command: >
+      bash -lc "/opt/spark/sbin/start-worker.sh spark://spark-master:7077 --webui-port 8081
+      && tail -f /opt/spark/logs/*"
+    networks:
+      - bdnet
+
+  spark-aggregator:
+    image: apache/spark:3.5.1-python3
+    user: "0:0"   # FIX permission Ivy cache
+    depends_on:
+      - kafka
+      - spark-master
+      - spark-worker
+    environment:
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_TOPIC=weather_transformed
+      # FIX Ivy cache writable
+      - SPARK_SUBMIT_OPTS=-Divy.cache.dir=/tmp/ivy -Divy.home=/tmp/ivy
+    volumes:
+      - ./spark-app:/opt/spark-app
+      - spark-ivy:/tmp/ivy
+    command: >
+      bash -lc "/opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+      /opt/spark-app/weather_aggregation.py"
+    networks:
+      - bdnet
+
 networks:
   bdnet:
+    driver: bridge
+
+volumes:
+  spark-ivy:
